@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
+import OptionImages from "./components/option-images";
 import { PersonSchema, PlanRequestSchema, PlanResultSchema, type Person, type PlanOption, type PlanRequest, type PlanResult } from "@/lib/planner";
 
 const STORAGE_KEY = "out-together:v1";
@@ -29,6 +30,7 @@ function OptionCard({ option, index, busy, onRefine }: {
   const [adjustment, setAdjustment] = useState("");
   const money = (amount: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(amount);
   return <article className="option-card">
+    <OptionImages sources={option.stops.map(({ sourceUrl, venue }) => ({ sourceUrl, venue }))} title={option.title} />
     <div className="option-number">Option {index + 1}</div>
     <h3>{option.title}</h3>
     <p>{option.description}</p>

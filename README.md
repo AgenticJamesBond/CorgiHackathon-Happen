@@ -39,6 +39,12 @@ The response validator checks structure, URL schemes, basic cost ranges, and sto
 
 Browsers that expose `document.modelContext` can prepare the outing text with the optional `prepare_outing` tool. The user still clicks the normal research button.
 
+## Venue images
+
+Each itinerary has a gallery sourced from the venue and event URLs already in its stops. This works for saved plans too and makes no additional LLM calls. The app reads published Open Graph/Twitter images, structured image data, and large page images, with a link back to the publisher below each photo. Publisher graphics and event posters can appear alongside photographs; images are previews from the linked pages, not proof of current venue conditions or availability.
+
+Image loading is independent of planning. Missing, blocked, or undersized images are skipped; if none load, the card keeps its itinerary and a neutral placeholder. Both page and image requests are made through the local server with public-address checks on each redirect, DNS address pinning, size/time limits, and no forwarded credentials. Image bytes have a bounded memory cache; source metadata is cached for ten minutes. There is no image API key or paid image service.
+
 ## Checks
 
 ```sh
