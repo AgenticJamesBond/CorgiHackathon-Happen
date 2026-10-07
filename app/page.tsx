@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
-import { PersonSchema, PlanResultSchema, type Person, type PlanOption, type PlanRequest, type PlanResult } from "@/lib/planner";
+import { PersonSchema, PlanRequestSchema, PlanResultSchema, type Person, type PlanOption, type PlanRequest, type PlanResult } from "@/lib/planner";
 
 const STORAGE_KEY = "out-together:v1";
+const PENDING_KEY = "out-together:pending-session";
 const examples: Person[] = [
   { id: "jamie", name: "Jamie", blurb: "Likes bookstores, live music, and trying new food. Prefers relaxed places and getting around on foot." },
   { id: "alex", name: "Alex", blurb: "Likes art, hands-on activities, and being outdoors. Vegetarian. Happy with a little walking, but not a long hike." },
@@ -69,12 +70,15 @@ export default function Home() {
   const [error, setError] = useState("");
   const [storageNote, setStorageNote] = useState("");
   const [elapsed, setElapsed] = useState(0);
+  const [pendingSession, setPendingSession] = useState("");
   const inFlight = useRef(false);
   const resultHeading = useRef<HTMLHeadingElement>(null);
   const selected = people.filter(person => selectedIds.includes(person.id));
 
   useEffect(() => {
     try {
+      const resume = new URLSearchParams(window.location.search).get("resume") || localStorage.getItem(PENDING_KEY);
+      if (resume && /^[a-f0-9]{32}$/i.test(resume)) setPendingSession(resume);
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = SavedSchema.safeParse(JSON.parse(raw));
@@ -87,6 +91,14 @@ export default function Home() {
       }
     } catch { setStorageNote("Browser storage isn't available. Changes will last for this visit only."); }
     setHydrated(true);
+  }, []);
+
+  const rememberSession = useCallback((sessionId: string) => {
+    setPendingSession(sessionId);
+    try { if (sessionId) localStorage.setItem(PENDING_KEY, sessionId); else localStorage.removeItem(PENDING_KEY); } catch { /* The current tab can still recover. */ }
+    if (!sessionId && new URLSearchParams(window.location.search).has("resume")) {
+      const url = new URL(window.location.href); url.searchParams.delete("resume"); window.history.replaceState(null, "", url);
+    }
   }, []);
 
   useEffect(() => {
@@ -105,25 +117,57 @@ export default function Home() {
   const generate = useCallback(async (request: PlanRequest): Promise<boolean> => {
     if (inFlight.current) return false;
     inFlight.current = true; setBusy(true); setError(""); setElapsed(0);
+    // Hermes accepts a caller-chosen session ID. Save it before starting work so
+    // a dropped connection or page refresh cannot lose the running agent.
+    const sessionId = request.sessionId || crypto.randomUUID().replaceAll("-", "");
+    rememberSession(sessionId);
     try {
       const response = await fetch("/api/plan", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request),
-        signal: AbortSignal.timeout(315_000),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...request, sessionId }),
+        signal: AbortSignal.timeout(915_000),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : "Something went wrong. Please try again.");
+      if (!response.ok) {
+        if (!data.recoverable) rememberSession("");
+        throw new Error(typeof data.error === "string" ? data.error : "Something went wrong. Please try again.");
+      }
       const next = PlanResultSchema.safeParse(data);
       if (!next.success) throw new Error("The response wasn't a complete plan. Please try again.");
       setResult(next.data); setLastRun({ people: request.people, outing: request.outing });
+      rememberSession("");
       requestAnimationFrame(() => resultHeading.current?.focus());
       return true;
     } catch (caught) {
       setError(caught instanceof Error && caught.name === "TimeoutError"
-        ? "Research is taking longer than expected. The remote agent may still be running; check Agent37 before retrying."
+        ? "The connection timed out. Use Resume research to retrieve the same run without starting over."
         : caught instanceof Error ? caught.message : "Couldn't connect. Please try again.");
       return false;
     } finally { inFlight.current = false; setBusy(false); }
-  }, []);
+  }, [rememberSession]);
+
+  async function resumeResearch() {
+    if (inFlight.current || !pendingSession) return;
+    inFlight.current = true; setBusy(true); setElapsed(0); setError("");
+    try {
+      const started = Date.now();
+      while (Date.now() - started < 900_000) {
+        const response = await fetch(`/api/plan?sessionId=${encodeURIComponent(pendingSession)}`, { cache: "no-store", signal: AbortSignal.timeout(200_000) });
+        const data = await response.json();
+        if (response.status === 202) { await new Promise(resolve => setTimeout(resolve, 5000)); continue; }
+        if (!response.ok) {
+          if (response.status === 422 || response.status === 400) rememberSession("");
+          throw new Error(data.error || "Couldn't retrieve this research yet.");
+        }
+        const recovered = PlanResultSchema.parse(data.result);
+        const request = PlanRequestSchema.parse(data.request);
+        setResult(recovered); setLastRun({ people: request.people, outing: request.outing }); rememberSession("");
+        requestAnimationFrame(() => resultHeading.current?.focus());
+        return;
+      }
+      setError("The agent is still working. You can resume this research again later.");
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "Couldn't reconnect. Your research session is saved."); }
+    finally { inFlight.current = false; setBusy(false); }
+  }
 
   // A browser agent can prepare the same form without bypassing the user's Generate action.
   useEffect(() => {
@@ -154,7 +198,7 @@ export default function Home() {
         if (!outing.trim()) { setError("Tell us what you have in mind for the outing."); return; }
         await generate({ people: selected, outing: outing.trim() });
       }}>
-        <fieldset disabled={busy || !hydrated}>
+        <fieldset disabled={busy || !hydrated || !!pendingSession}>
           <div className="field-header"><label id="people-label">Who's coming?</label><button type="button" className="text-button" onClick={() => setEditing(!editing)} aria-expanded={editing} aria-controls="people-editor">{editing ? "Done editing" : "Edit people"}</button></div>
           <details className="people-select"><summary aria-labelledby="people-label selected-people"><span id="selected-people">{selected.length ? selected.map(person => person.name || "Unnamed person").join(", ") : "Choose people"}</span><span aria-hidden="true">⌄</span></summary><div className="people-menu">{people.length ? people.map(person => <label key={person.id} className="person-choice"><input type="checkbox" checked={selectedIds.includes(person.id)} onChange={event => setSelectedIds(current => event.target.checked ? [...current, person.id] : current.filter(id => id !== person.id))} /><span><strong>{person.name || "Unnamed person"}</strong><span className="choice-blurb">{person.blurb || "Add their interests in Edit people."}</span></span></label>) : <p className="small muted">Add someone using Edit people.</p>}</div></details>
           {editing && <div id="people-editor" className="people-editor">
@@ -177,6 +221,7 @@ export default function Home() {
       {storageNote && <p className="notice" role="status">{storageNote}</p>}
       {busy && <div className="loading" role="status"><span className="spinner" aria-hidden="true" /><div><strong>Finding options that fit</strong><p>Your agent is researching venues and building itineraries. This can take a few minutes.</p><span className="small muted" aria-hidden="true">{Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")} elapsed</span></div></div>}
       {error && <p className="error" role="alert">{error}</p>}
+      {pendingSession && !busy && <div className="resume-row"><p className="small muted">A research session is saved. Reconnect to retrieve its result without starting another search.</p><button type="button" onClick={resumeResearch}>Resume research</button></div>}
     </section>
     {result && lastRun ? <section className="results" aria-busy={busy}>
       <div className="results-header"><h2 ref={resultHeading} tabIndex={-1}>A few good ways to spend the day</h2><p>{result.plan.summary}</p><p className="small muted">For {lastRun.people.map(person => person.name).join(" & ")} · Researched {new Date(result.generatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/Los_Angeles" })} SF time</p><details className="plan-context"><summary>Request & assumptions</summary><p>{lastRun.outing}</p>{result.plan.assumptions.length > 0 && <ul>{result.plan.assumptions.map((assumption, i) => <li key={i}>{assumption}</li>)}</ul>}</details></div>

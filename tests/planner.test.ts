@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanningPrompt, parsePlanOutput, PlanRequestSchema, type Plan } from "../lib/planner.ts";
-import { POST } from "../app/api/plan/route.ts";
+import { GET, POST } from "../app/api/plan/route.ts";
+import { recoverPlan } from "../lib/recovery.ts";
 
 // Synthetic contract data for tests only; never served by the application.
 function fixture(): Plan {
@@ -50,6 +51,15 @@ test("API validates requests before contacting Agent37", async () => {
   assert.equal((await POST(request({ people: [] }))).status, 400);
   assert.equal((await POST(request(input, "https://unrelated.example"))).status, 403);
 });
+test("API accepts the browser's Host when Next.js uses an internal hostname", async () => {
+  const throughNext = (origin: string) => new Request("http://localhost:3000/api/plan", {
+    method: "POST", headers: { Origin: origin, Host: "127.0.0.1:3000", "Content-Type": "application/json", "X-Forwarded-Host": "unrelated.example" },
+    body: JSON.stringify({ people: [] }),
+  });
+  // Reaching input validation proves the legitimate origin was accepted.
+  assert.equal((await POST(throughNext("http://127.0.0.1:3000"))).status, 400);
+  assert.equal((await POST(throughNext("https://unrelated.example"))).status, 403);
+});
 test("API keeps credentials on the server and reuses the session for refinements", async () => {
   const previous = { key: process.env.AGENT37_KEY, instance: process.env.AGENT37_INSTANCE_URL, fetch: globalThis.fetch };
   process.env.AGENT37_KEY = "test-server-only-key";
@@ -79,6 +89,9 @@ test("API returns clear errors for missing credentials, budget failure, and bad 
     process.env.AGENT37_KEY = "test-key"; process.env.AGENT37_INSTANCE_URL = "https://test-instance.agent37.app";
     globalThis.fetch = async () => Response.json({ status: "failed", error: { code: "budget_exceeded" } });
     const budget = await POST(request(input)); assert.equal(budget.status, 502); assert.match((await budget.json()).error, /budget/);
+    globalThis.fetch = async () => Response.json({ status: "failed", error: { code: "agent_error", message: "HTTP 402: Instance budget exhausted. Raise the monthly cap or top up this instance to continue." } });
+    const wrappedBudget = await POST(request(input));
+    assert.equal(wrappedBudget.status, 502); assert.match((await wrappedBudget.json()).error, /Workspace credit is separate from the instance allowance/);
     globalThis.fetch = async () => Response.json({ status: "completed", session_id: session, output_text: "<script>untrusted</script>" });
     const malformed = await POST(request(input)); assert.equal(malformed.status, 502); assert.doesNotMatch(JSON.stringify(await malformed.json()), /untrusted/);
   } finally { restore(previous); }
@@ -88,3 +101,39 @@ function restore(previous: { key: string | undefined; instance: string | undefin
   if (previous.instance === undefined) delete process.env.AGENT37_INSTANCE_URL; else process.env.AGENT37_INSTANCE_URL = previous.instance;
   globalThis.fetch = previous.fetch;
 }
+
+test("recovers a finished plan and its original request from the same conversation", () => {
+  const recovered = recoverPlan([
+    { role: "user", content: buildPlanningPrompt(input) },
+    { role: "assistant", content: "Researching sources." },
+    { role: "assistant", content: JSON.stringify(fixture()), created_at: 1791392400000 },
+  ], session);
+  assert.deepEqual(recovered.result.plan, fixture());
+  assert.equal(recovered.result.sessionId, session);
+  assert.equal(recovered.request.outing, input.outing);
+  assert.equal(recovered.request.people[0].name, "Sam");
+  assert.throws(() => recoverPlan([{ role: "user", content: "An unrelated private conversation" }, { role: "assistant", content: JSON.stringify(fixture()) }], session));
+  assert.throws(() => recoverPlan([{ role: "user", content: buildPlanningPrompt(input) }], session));
+});
+test("resume reads the running session without starting another agent turn", async () => {
+  const previous = { key: process.env.AGENT37_KEY, instance: process.env.AGENT37_INSTANCE_URL, fetch: globalThis.fetch };
+  process.env.AGENT37_KEY = "test-key"; process.env.AGENT37_INSTANCE_URL = "https://test-instance.agent37.app";
+  let active = true;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(String(url), `https://test-instance.agent37.app/v1/sessions/${session}`);
+    assert.equal(init?.body, undefined);
+    return Response.json({ active_response_id: active ? "b".repeat(32) : null, history: [
+      { role: "user", content: buildPlanningPrompt(input) },
+      { role: "assistant", content: JSON.stringify(fixture()) },
+    ] });
+  };
+  try {
+    const url = `http://localhost:3000/api/plan?sessionId=${session}`;
+    assert.equal((await GET(new Request(url))).status, 202);
+    active = false;
+    const complete = await GET(new Request(url));
+    assert.equal(complete.status, 200); assert.deepEqual((await complete.json()).result.plan, fixture());
+    assert.equal((await GET(new Request("http://localhost:3000/api/plan?sessionId=invalid"))).status, 400);
+    assert.equal((await GET(new Request(url, { headers: { Origin: "https://unrelated.example" } }))).status, 403);
+  } finally { restore(previous); }
+});

@@ -46,6 +46,7 @@ h4 { font-size: 16px; line-height: 1.4; margin: 4px 0 9px; }
 .outing-label { margin: 24px 0 9px; }
 .submit-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-top: 24px; }
 .small { font-size: 13px; }
+.resume-row { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 18px; }
 .muted { color: var(--muted); }
 .people-editor { border: 1px solid var(--line); background: #f8f9fc; border-radius: 7px; margin-top: 14px; padding: 17px; }
 .person-editor { padding: 12px 0 18px; }
