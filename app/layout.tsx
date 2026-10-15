@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Out together · San Francisco",
-  description: "Find a few good ways to spend time together in San Francisco.",
+  title: "Hangout",
+  description: "Find a few good ways to spend time together nearby.",
   icons: { icon: "/icon.svg" },
 };
 

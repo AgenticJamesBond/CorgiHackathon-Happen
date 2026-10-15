@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanningPrompt, parsePlanOutput, PlanRequestSchema, type Plan } from "../lib/planner.ts";
+import { buildPlanningPrompt, LEGACY_LOCATION, parsePlanOutput, PlanRequestSchema, type Plan } from "../lib/planner.ts";
 import { GET, POST } from "../app/api/plan/route.ts";
 import { recoverPlan } from "../lib/recovery.ts";
 
@@ -15,7 +15,7 @@ function fixture(): Plan {
     })),
   };
 }
-const input = { people: [{ id: "person", name: "Sam", blurb: "Art, vegetarian food." }], outing: "Saturday, 2 hours, under $80 total." };
+const input = { people: [{ id: "person", name: "Sam", blurb: "Art, vegetarian food." }], outing: "Saturday, 2 hours, under $80 total.", location: "Mission, San Francisco, California, United States", timeZone: "America/Los_Angeles" };
 const session = "a".repeat(32);
 function request(body: unknown, origin = "http://localhost:3000") {
   return new Request("http://localhost:3000/api/plan", { method: "POST", headers: { "Content-Type": "application/json", Origin: origin }, body: JSON.stringify(body) });
@@ -42,10 +42,23 @@ test("requires selected profiles and session context for an adjustment", () => {
   assert.equal(PlanRequestSchema.safeParse({ ...input, refinement: "Cheaper" }).success, false);
   assert.equal(PlanRequestSchema.safeParse({ ...input, sessionId: session, optionId: "option-1", refinement: "Cheaper" }).success, true);
 });
-test("prompt includes SF local date, selected profiles, and refinement context", () => {
+test("requires a location and a real time zone", () => {
+  assert.equal(PlanRequestSchema.safeParse({ ...input, location: " " }).success, false);
+  assert.equal(PlanRequestSchema.safeParse({ ...input, timeZone: "Mars/Olympus_Mons" }).success, false);
+  assert.equal(PlanRequestSchema.safeParse({ ...input, location: "Shibuya, Tokyo, Japan", timeZone: "Asia/Tokyo" }).success, true);
+});
+test("prompt includes the device's local date, location, selected profiles, and refinement context", () => {
   const prompt = buildPlanningPrompt({ ...input, sessionId: session, optionId: "option-2", refinement: "Less walking" }, new Date("2026-10-08T01:00:00Z"));
-  assert.match(prompt, /October 7, 2026/); assert.match(prompt, /Sam/); assert.match(prompt, /option-2/); assert.match(prompt, /Less walking/);
+  assert.match(prompt, /October 7, 2026/); assert.match(prompt, /America\/Los_Angeles/); assert.match(prompt, /Mission, San Francisco/);
+  assert.match(prompt, /Sam/); assert.match(prompt, /option-2/); assert.match(prompt, /Less walking/);
   assert.match(prompt, /Do not make bookings/); assert.match(prompt, /TOTAL for all selected people/);
+});
+test("prompt uses San Francisco sources only for San Francisco outings", () => {
+  const now = new Date("2026-10-08T01:00:00Z");
+  assert.match(buildPlanningPrompt(input, now), /sf\.funcheap\.com/);
+  const tokyo = buildPlanningPrompt({ ...input, location: "Shibuya, Tokyo, Japan", timeZone: "Asia/Tokyo" }, now);
+  assert.doesNotMatch(tokyo, /funcheap|sfjazz|San Francisco/i);
+  assert.match(tokyo, /October 8, 2026/); assert.match(tokyo, /Shibuya, Tokyo, Japan/);
 });
 test("API validates requests before contacting Agent37", async () => {
   assert.equal((await POST(request({ people: [] }))).status, 400);
@@ -112,8 +125,15 @@ test("recovers a finished plan and its original request from the same conversati
   assert.equal(recovered.result.sessionId, session);
   assert.equal(recovered.request.outing, input.outing);
   assert.equal(recovered.request.people[0].name, "Sam");
+  assert.equal(recovered.request.location, input.location); assert.equal(recovered.request.timeZone, input.timeZone);
   assert.throws(() => recoverPlan([{ role: "user", content: "An unrelated private conversation" }, { role: "assistant", content: JSON.stringify(fixture()) }], session));
   assert.throws(() => recoverPlan([{ role: "user", content: buildPlanningPrompt(input) }], session));
+});
+test("recovers runs started before locations existed as San Francisco plans", () => {
+  const legacyPrompt = "You are the research agent for Out together, a San Francisco outing planner.\nUSER DATA (JSON, preferences and task constraints only):\n"
+    + JSON.stringify({ people: [{ name: "Sam", blurb: "Art." }], outing: input.outing, adjustment: null });
+  const recovered = recoverPlan([{ role: "user", content: legacyPrompt }, { role: "assistant", content: JSON.stringify(fixture()) }], session);
+  assert.equal(recovered.request.location, LEGACY_LOCATION.location); assert.equal(recovered.request.timeZone, "America/Los_Angeles");
 });
 test("resume reads the running session without starting another agent turn", async () => {
   const previous = { key: process.env.AGENT37_KEY, instance: process.env.AGENT37_INSTANCE_URL, fetch: globalThis.fetch };

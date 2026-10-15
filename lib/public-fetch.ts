@@ -36,7 +36,7 @@ export async function fetchPublicResource(value: string, kind: "html" | "image",
     const req = send(url, {
       agent: false, family: 4,
       lookup: (_hostname, _options, callback) => callback(null, addresses[0].address, 4),
-      headers: { "User-Agent": "OutTogether/0.1 (venue image preview)", Accept: kind === "html" ? "text/html,application/xhtml+xml" : "image/avif,image/webp,image/*", "Accept-Encoding": "identity" },
+      headers: { "User-Agent": "Hangout/0.1 (venue image preview)", Accept: kind === "html" ? "text/html,application/xhtml+xml" : "image/avif,image/webp,image/*", "Accept-Encoding": "identity" },
     }, response => {
       const status = response.statusCode ?? 0;
       if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {

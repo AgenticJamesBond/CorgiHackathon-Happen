@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import OptionImages from "./components/option-images";
-import { PersonSchema, PlanRequestSchema, PlanResultSchema, type Person, type PlanOption, type PlanRequest, type PlanResult } from "@/lib/planner";
+import { LEGACY_LOCATION, PersonSchema, PlanRequestSchema, PlanResultSchema, type Person, type PlanOption, type PlanRequest, type PlanResult } from "@/lib/planner";
 
 const STORAGE_KEY = "out-together:v1";
 const PENDING_KEY = "out-together:pending-session";
@@ -11,12 +11,16 @@ const examples: Person[] = [
   { id: "jamie", name: "Jamie", blurb: "Likes bookstores, live music, and trying new food. Prefers relaxed places and getting around on foot." },
   { id: "alex", name: "Alex", blurb: "Likes art, hands-on activities, and being outdoors. Vegetarian. Happy with a little walking, but not a long hike." },
 ];
-const RunSchema = z.object({ people: z.array(PersonSchema).min(1).max(8), outing: z.string().max(3000) });
+const RunSchema = z.object({
+  people: z.array(PersonSchema).min(1).max(8), outing: z.string().max(3000),
+  location: z.string().max(200).default(LEGACY_LOCATION.location), timeZone: z.string().max(64).default(LEGACY_LOCATION.timeZone),
+});
 type Run = z.infer<typeof RunSchema>;
 const SavedSchema = z.object({
   people: z.array(PersonSchema).max(8), selectedIds: z.array(z.string()).max(8), outing: z.string().max(3000),
-  result: PlanResultSchema.nullable(), lastRun: RunSchema.nullable(),
+  location: z.string().max(200).default(""), result: PlanResultSchema.nullable(), lastRun: RunSchema.nullable(),
 });
+const shortPlace = (place: string) => place.split(",").slice(0, 2).join(",").trim();
 
 function duration(minutes: number) {
   const hours = Math.floor(minutes / 60);
@@ -64,6 +68,10 @@ export default function Home() {
   const [people, setPeople] = useState<Person[]>(examples);
   const [selectedIds, setSelectedIds] = useState(["jamie", "alex"]);
   const [outing, setOuting] = useState("");
+  const [location, setLocation] = useState("");
+  const [locating, setLocating] = useState(false);
+  const [detected, setDetected] = useState(false);
+  const [locationNote, setLocationNote] = useState("");
   const [editing, setEditing] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [result, setResult] = useState<PlanResult | null>(null);
@@ -77,7 +85,28 @@ export default function Home() {
   const resultHeading = useRef<HTMLHeadingElement>(null);
   const selected = people.filter(person => selectedIds.includes(person.id));
 
+  const locate = useCallback(() => {
+    if (!("geolocation" in navigator)) { setLocationNote("This browser can't share its location. Type a city or neighborhood instead."); return; }
+    setLocating(true); setLocationNote("");
+    navigator.geolocation.getCurrentPosition(async ({ coords }) => {
+      try {
+        const params = new URLSearchParams({ lat: coords.latitude.toFixed(3), lon: coords.longitude.toFixed(3) });
+        const response = await fetch(`/api/place?${params}`, { signal: AbortSignal.timeout(20_000) });
+        const data = await response.json();
+        if (!response.ok || typeof data.location !== "string") throw new Error("No place name");
+        setLocation(data.location); setDetected(true);
+      } catch { setLocationNote("Found your location but couldn't name it. Type a city or neighborhood instead."); }
+      finally { setLocating(false); }
+    }, error => {
+      setLocating(false);
+      setLocationNote(error.code === error.PERMISSION_DENIED
+        ? "Location access is off. Type a city or neighborhood, or allow location for this site in your browser settings."
+        : "Couldn't get your location. Type a city or neighborhood instead.");
+    }, { timeout: 15_000, maximumAge: 600_000 });
+  }, []);
+
   useEffect(() => {
+    let savedLocation = "";
     try {
       const resume = new URLSearchParams(window.location.search).get("resume") || localStorage.getItem(PENDING_KEY);
       if (resume && /^[a-f0-9]{32}$/i.test(resume)) setPendingSession(resume);
@@ -87,13 +116,14 @@ export default function Home() {
         if (saved.success) {
           const data = saved.data;
           setPeople(data.people); setSelectedIds(data.selectedIds.filter(id => data.people.some(person => person.id === id)));
-          setOuting(data.outing);
+          setOuting(data.outing); setLocation(data.location); savedLocation = data.location;
           if (data.result && data.lastRun) { setResult(data.result); setLastRun(data.lastRun); }
         } else setStorageNote("Your saved data couldn't be loaded. You can start a new plan.");
       }
     } catch { setStorageNote("Browser storage isn't available. Changes will last for this visit only."); }
     setHydrated(true);
-  }, []);
+    if (!savedLocation) navigator.permissions?.query({ name: "geolocation" }).then(status => { if (status.state === "granted") locate(); }, () => {});
+  }, [locate]);
 
   const rememberSession = useCallback((sessionId: string) => {
     setPendingSession(sessionId);
@@ -105,9 +135,9 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ people, selectedIds, outing, result, lastRun })); }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ people, selectedIds, outing, location, result, lastRun })); }
     catch { setStorageNote("Couldn't save to this browser. Keep this tab open to preserve your plan."); }
-  }, [people, selectedIds, outing, result, lastRun, hydrated]);
+  }, [people, selectedIds, outing, location, result, lastRun, hydrated]);
 
   useEffect(() => {
     if (!busy) return;
@@ -135,7 +165,7 @@ export default function Home() {
       }
       const next = PlanResultSchema.safeParse(data);
       if (!next.success) throw new Error("The response wasn't a complete plan. Please try again.");
-      setResult(next.data); setLastRun({ people: request.people, outing: request.outing });
+      setResult(next.data); setLastRun({ people: request.people, outing: request.outing, location: request.location, timeZone: request.timeZone });
       rememberSession("");
       requestAnimationFrame(() => resultHeading.current?.focus());
       return true;
@@ -162,7 +192,7 @@ export default function Home() {
         }
         const recovered = PlanResultSchema.parse(data.result);
         const request = PlanRequestSchema.parse(data.request);
-        setResult(recovered); setLastRun({ people: request.people, outing: request.outing }); rememberSession("");
+        setResult(recovered); setLastRun({ people: request.people, outing: request.outing, location: request.location, timeZone: request.timeZone }); rememberSession("");
         requestAnimationFrame(() => resultHeading.current?.focus());
         return;
       }
@@ -177,7 +207,7 @@ export default function Home() {
     const context = (document as Document & { modelContext?: Context }).modelContext;
     if (!context) return;
     try {
-      context.registerTool({ name: "prepare_outing", description: "Fill the outing request in Out together. The user reviews it and clicks Find three options to start research.", inputSchema: { type: "object", properties: { outing: { type: "string", maxLength: 3000 } }, required: ["outing"], additionalProperties: false }, execute: async ({ outing: next }) => {
+      context.registerTool({ name: "prepare_outing", description: "Fill the outing request in Hangout. The user reviews it and clicks Find three options to start research.", inputSchema: { type: "object", properties: { outing: { type: "string", maxLength: 3000 } }, required: ["outing"], additionalProperties: false }, execute: async ({ outing: next }) => {
         if (inFlight.current || typeof next !== "string" || !next.trim() || next.length > 3000) return { content: [{ type: "text", text: "The form is busy or the request is invalid." }], isError: true };
         setOuting(next); return { content: [{ type: "text", text: "Outing request filled. Ready for the user to review." }] };
       } });
@@ -190,15 +220,16 @@ export default function Home() {
   }
 
   return <main>
-    <header className="site-header"><a className="brand" href="/">Out together<span className="brand-dot" aria-hidden="true">.</span></a><span className="city">San Francisco</span></header>
+    <header className="site-header"><a className="brand" href="/">Hangout<span className="brand-dot" aria-hidden="true">.</span></a>{location.trim() && <span className="city" title={location}>{shortPlace(location)}</span>}</header>
     <section className="intro"><p className="eyebrow">LESS PLANNING. MORE TIME TOGETHER.</p><h1>What should we do?</h1><p>Pick your people, tell us what you have in mind, and get three ways to spend the time.</p></section>
     <section className="planner" aria-label="Plan an outing">
       <form onSubmit={async event => {
         event.preventDefault();
         if (!selected.length) { setError("Choose at least one person."); return; }
         if (selected.some(person => !person.name.trim() || !person.blurb.trim())) { setError("Add a name and a few interests for everyone you've selected."); setEditing(true); return; }
+        if (!location.trim()) { setError("Add where you'll be, or use your location."); return; }
         if (!outing.trim()) { setError("Tell us what you have in mind for the outing."); return; }
-        await generate({ people: selected, outing: outing.trim() });
+        await generate({ people: selected, outing: outing.trim(), location: location.trim(), timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" });
       }}>
         <fieldset disabled={busy || !hydrated || !!pendingSession}>
           <div className="field-header"><label id="people-label">Who's coming?</label><button type="button" className="text-button" onClick={() => setEditing(!editing)} aria-expanded={editing} aria-controls="people-editor">{editing ? "Done editing" : "Edit people"}</button></div>
@@ -214,9 +245,12 @@ export default function Home() {
             <button type="button" className="secondary" disabled={people.length >= 8} onClick={() => { const id = crypto.randomUUID(); setPeople(current => [...current, { id, name: "", blurb: "" }]); setSelectedIds(current => [...current, id]); }}>+ Add person</button>
           </div>}
           {!editing && <p className="field-note">People and their interests are saved in this browser. Edit the examples to make them yours.</p>}
+          <div className="field-header location-header"><label htmlFor="location">Where?</label><button type="button" className="text-button" disabled={locating} onClick={locate}>{locating ? "Finding your location…" : "Use my location"}</button></div>
+          <input id="location" value={location} onChange={event => { setLocation(event.target.value); setDetected(false); }} maxLength={200} placeholder="City or neighborhood" autoComplete="address-level2" required aria-describedby="location-help" />
+          <p id="location-help" className="field-note" aria-live="polite">{locationNote || (detected ? "Found from your device location. Edit it if you'll be somewhere else." : "Use your location, or type a city or neighborhood.")}</p>
           <label htmlFor="outing" className="outing-label">What do you have in mind?</label>
-          <textarea id="outing" value={outing} onChange={event => setOuting(event.target.value)} rows={3} maxLength={3000} placeholder="Saturday afternoon, 3 hours, under $100 total. Starting in the Mission. Something relaxed." required aria-describedby="outing-help" />
-          <div id="outing-help" className="field-note">A day, how much time you have, a total budget, and where you'll start.</div>
+          <textarea id="outing" value={outing} onChange={event => setOuting(event.target.value)} rows={3} maxLength={3000} placeholder="Saturday afternoon, 3 hours, under $100 total. Something relaxed." required aria-describedby="outing-help" />
+          <div id="outing-help" className="field-note">A day, how much time you have, a total budget, and where you'll start if it's not where you are.</div>
           <div className="submit-row"><button type="submit" disabled={busy || !hydrated}>{busy ? "Researching…" : "Find three options"}<span aria-hidden="true"> →</span></button><span className="small muted">Researched by your Hermes agent</span></div>
         </fieldset>
       </form>
@@ -226,9 +260,9 @@ export default function Home() {
       {pendingSession && !busy && <div className="resume-row"><p className="small muted">A research session is saved. Reconnect to retrieve its result without starting another search.</p><button type="button" onClick={resumeResearch}>Resume research</button></div>}
     </section>
     {result && lastRun ? <section className="results" aria-busy={busy}>
-      <div className="results-header"><h2 ref={resultHeading} tabIndex={-1}>A few good ways to spend the day</h2><p>{result.plan.summary}</p><p className="small muted">For {lastRun.people.map(person => person.name).join(" & ")} · Researched {new Date(result.generatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: "America/Los_Angeles" })} SF time</p><details className="plan-context"><summary>Request & assumptions</summary><p>{lastRun.outing}</p>{result.plan.assumptions.length > 0 && <ul>{result.plan.assumptions.map((assumption, i) => <li key={i}>{assumption}</li>)}</ul>}</details></div>
+      <div className="results-header"><h2 ref={resultHeading} tabIndex={-1}>A few good ways to spend the day</h2><p>{result.plan.summary}</p><p className="small muted">For {lastRun.people.map(person => person.name).join(" & ")} · Near {shortPlace(lastRun.location)} · Researched {new Date(result.generatedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: lastRun.timeZone, timeZoneName: "short" })}</p><details className="plan-context"><summary>Request & assumptions</summary><p>{lastRun.outing}</p>{result.plan.assumptions.length > 0 && <ul>{result.plan.assumptions.map((assumption, i) => <li key={i}>{assumption}</li>)}</ul>}</details></div>
       <div className="options-grid">{result.plan.options.map((option, index) => <OptionCard key={`${result.sessionId}-${option.id}`} option={option} index={index} busy={busy} onRefine={async (optionId, refinement) => generate({ ...lastRun, sessionId: result.sessionId, optionId, refinement })} />)}</div>
     </section> : <section className="empty-state"><span className="empty-symbol" aria-hidden="true">↗</span><h2>A little less “I don't know, you pick.”</h2><p>Your options will appear here, with a plan for the time, estimated costs, and links to the places.</p></section>}
-    <footer>Made for time together in San Francisco.</footer>
+    <footer>Made for time together. Location names © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors.</footer>
   </main>;
 }

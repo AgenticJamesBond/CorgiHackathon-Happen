@@ -1,6 +1,6 @@
-# Out together
+# Hangout
 
-A local San Francisco outing planner. Pick people, describe the outing, and ask a Hermes agent on Agent37 to research three itineraries. Each option includes timing, estimated group costs, source links, and a way to request changes in the same agent session.
+An outing planner for wherever you are. Pick people, share your location or type a place, describe the outing, and ask a Hermes agent on Agent37 to research three itineraries. Each option includes timing, estimated group costs, source links, and a way to request changes in the same agent session.
 
 ## Run locally
 
@@ -25,9 +25,9 @@ If the agent reports **HTTP 402: Instance budget exhausted**, open Agent37 → I
 
 ## How it works
 
-1. The browser saves the people, selected profiles, request, and latest successful plan in local storage. The initial Jamie/Alex profiles are editable examples.
-2. The browser sends the selected profiles and request to `POST /api/plan` on this Next.js server.
-3. The server adds the planning instructions and current San Francisco date/time, then calls the instance's `/v1/responses` endpoint using `X-Agent37-Key`. The key is never sent to the browser.
+1. The browser saves the people, selected profiles, location, request, and latest successful plan in local storage. The initial Jamie/Alex profiles are editable examples.
+2. The browser sends the selected profiles, location, device time zone, and request to `POST /api/plan` on this Next.js server.
+3. The server adds the planning instructions and the current date/time in the device's time zone, then calls the instance's `/v1/responses` endpoint using `X-Agent37-Key`. The key is never sent to the browser.
 4. Hermes researches public sources and returns structured JSON. The server validates it before rendering three itinerary cards.
 5. The browser saves a new Hermes-compatible `session_id` before submitting the first request. An adjustment reuses that session and the chosen option ID. Starting a new search creates a new session.
 
@@ -36,6 +36,12 @@ The agent is instructed to research only; it must not reserve, purchase, contact
 Failures display an error and preserve any earlier successful plan. There are no canned results or automatic paid retries. The server waits up to fifteen minutes; a timeout does not guarantee that the remote agent stopped. **Resume research** reconnects to the saved conversation after a timeout or page refresh, polling the session until the agent finishes and recovering its final answer. It does not submit another model request. For development recovery of an older run, `/?resume=SESSION_ID` opens the same recovery flow.
 
 The response validator checks structure, URL schemes, basic cost ranges, and stop durations. Factual accuracy, travel feasibility, prices, and available reservations still depend on the agent's research; schema validation cannot verify those claims. Each stop includes a source and availability note for review.
+
+## Location
+
+**Use my location** asks the browser for location permission. If access was already granted, the app fills the location automatically on load when none is saved. The browser rounds coordinates to three decimals (about 100 m) and sends them to `GET /api/place`, which names the place using OpenStreetMap's Nominatim reverse geocoder. Lookups are limited to one per second, cached in memory, and need no API key. Only the place name, never the coordinates, is sent to the agent. If permission is denied or the lookup fails, type a city or neighborhood instead.
+
+San Francisco outings get a list of curated local event sources; other places ask the agent to find local calendars and listings itself. Costs are still reported in USD, with approximate conversion noted for other currencies. Plans saved before locations existed are treated as San Francisco plans.
 
 Browsers that expose `document.modelContext` can prepare the outing text with the optional `prepare_outing` tool. The user still clicks the normal research button.
 
